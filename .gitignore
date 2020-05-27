@@ -1,0 +1,29 @@
+#################
+## Gitignore for AtmelStudio
+#################
+
+#Build Directories
+[Dd]ebug/
+[Rr]elease/
+.vscode/
+build/
+power_out_test/
+
+#Build Results
+*.o
+*.d
+*.eep
+*.elf
+*.hex
+*.map
+*.srec
+*.cppproj
+*.xml
+*.json
+
+#AtmelStudio solution files
+*.atsuo
+*.atsln
+
+# Visual Micro folder
+__vm/
