@@ -2,14 +2,14 @@
 #include "Sim800l.h"
 #include <SoftwareSerial.h>
 
-Sim800l::Sim800l(uint8_t pinRX, uint8_t pinTX, uint8_t pinRST, int baudRate = 4800) : _SIM(pinRX, pinTX), _pinRST(pinRST), _baudRate(baudRate)
+namespace Sim800
 {
-  userName = "Default";
-  userNumber = "+33000000000";
-  _newUser = false;
-  _timeInterval = 0;
-  firstCall = true;
-  _firstAccuWarning = true;
+
+Sim800l::Sim800l(uint8_t pinRX, uint8_t pinTX, uint8_t pinRST, int baudRate = 4800) : m_SIM(pinRX, pinTX), m_pinRST(pinRST), m_baudRate(baudRate)
+{
+  m_inputTimer = 0;
+  m_lastMsgSentLength = 0;
+  m_clearLastMessage();
 }
 
 //
@@ -18,516 +18,376 @@ Sim800l::Sim800l(uint8_t pinRX, uint8_t pinTX, uint8_t pinRST, int baudRate = 48
 
 void Sim800l::begin()
 {
-  _buffer.reserve(50);
-  _SIM.begin(_baudRate);
+  m_inputBuffer.reserve(50);
+  m_SIM.begin(m_baudRate);
   delay(500);
-  _SIM.print(F("AT\r\n"));
+  m_SIM.print(F("AT\r\n"));
 
   delay(1000);
-  _flush();
+  m_flush();
 }
 
-bool Sim800l::setToReceptionMode()
+void Sim800l::checkForIncommingData()
 {
-  bool isOk = true;
-  _SIM.print("AT+CMGF=1\r\n");
-  isOk &= _msgRecieved();
-  _SIM.print("AT+CPMS=\"SM\"\r\n");
-  isOk &= _msgRecieved();
-  _SIM.print("AT+CSDH=1\r\n");
-  isOk &= _msgRecieved();
-
-  return isOk;
-}
-
-void Sim800l::setLipoValue(int charge)
-{
-  _charge = charge;
-
-  if(_charge != -1 && _charge <= 15 && _firstAccuWarning)
+  if(m_SIM.available())
   {
-    _sendSms("Watch out, the accu level is low !");
-    _firstAccuWarning = false;
+    m_clearLastMessage();
+
+    char c = m_SIM.read();
+    if(c == '\n')
+    {
+        m_inputBuffer += '/';
+    }
+    else if(c == '\r' || c == '\t')
+    {
+        //skip
+    }
+    else
+    {
+        m_inputBuffer += c;
+    }
+    
+    m_inputTimer = millis();
+  }
+
+  if((m_inputTimer != 0 && millis() - m_inputTimer > 200) || m_inputBuffer.length() > 160)
+  {
+    m_inputTimer = 0;
+    if(m_lastMsgSentLength != 0)
+    {
+      m_inputBuffer.remove(0, m_lastMsgSentLength - 1);
+      m_lastMsgSentLength = 0;
+    }
+    DEBUG_PRINTLN("Receive:\t" + m_inputBuffer);
+    m_lastReceivedMsg = m_inputBuffer;
+    m_flush();
   }
 }
 
-void Sim800l::reset()
+void Sim800l::sendStringToSIM(String msgToSend)
 {
-  digitalWrite(_pinRST, 1);
-  delay(1000);
-  digitalWrite(_pinRST, 0);
-  delay(1000);
+  m_clearLastMessage();
+  m_lastMsgSentLength = msgToSend.length();
+  DEBUG_PRINTLN("Send:\t" + msgToSend);
+  m_SIM.print(msgToSend);
 }
 
-bool Sim800l::isUserConfigurated()
-{
-  if(userNumber == "+33000000000" || userNumber[0] != '+' || userNumber.length() < 12 || userNumber.length() > 15)
-  {
-    return false;
-  }
-  else if(userName == "Default" || userName == "" || userNumber.length() < 1)
-  {
-    return false;
-  }
-
-  return true;
-}
-
-bool Sim800l::hasCorrectSignal(int callInterval_second)
+int Sim800l::hasCorrectSignal(int callInterval_second)
 {
   static uint32_t lastCall = 0;
-  static bool lastValue = false;
 
   if (millis() - lastCall > callInterval_second * 1000)
   {
     DEBUG_PRINTLN("Connection Check");
     lastCall = millis();
-    _SIM.print(F("AT+CREG?\r\n"));
-    delay(2000);
-    _buffer = _readSerialString();
-    DEBUG_PRINTLN(_buffer);
-    int index = _buffer.indexOf(",");
+    sendStringToSIM(F("AT+CREG?\r\n"));
+    m_waitForResponse(2000);
+
+    int index = m_lastReceivedMsg.indexOf(",");
     if (index != -1)
     {
-      int signalValue = (_buffer.substring(index + 1, index + 2)).toInt();
+      int signalValue = (m_lastReceivedMsg.substring(index + 1, index + 2)).toInt();
       if (signalValue == 1 || signalValue == 5 || signalValue == 6  || signalValue == 7)
       {
-        lastValue = true;
-        _buffer = "";
-        return true;
+        m_clearLastMessage();
+        return 1;
       }
       else
       {
-        lastValue = false;
-        _buffer = "";
-        return false;
+        m_clearLastMessage();
+        return -1;
       }
     }
     else
     {
-      lastValue = false;
-      _buffer = "";
-      return false;
+      m_clearLastMessage();
+      return -1;
     }
   }
 
-  return lastValue;
+  return 0;
 }
 
-bool Sim800l::checkIfNewSMS()
+bool Sim800l::newSmsAvailable()
 {
-  if(_SIM.available())
+  if(m_lastReceivedMsg.length() != 0)
   {
-    _buffer = _readSerialString();
-
-    DEBUG_PRINTLN(_buffer);
-
-    if (_buffer.indexOf("+CMTI") != -1)
+    if (m_lastReceivedMsg.indexOf("+CMTI") != -1)
     {
-      _buffer = "";
+      m_clearLastMessage();
       DEBUG_PRINTLN("New SMS ! ");
       return true;
     }
     else
     {
-      _buffer = "";
       return false;
     }
   }
-
   return false;
 }
 
-bool Sim800l::_sendSms(String text)
+bool Sim800l::setToReceptionMode()
 {
-  _SIM.print(F("AT+CMGS=\"")); // command to send sms
-  _SIM.print(userNumber);
-  _SIM.print(F("\"\r"));
-  delay(3000);
-  // Send text
-  _buffer = _readSerialString();
-  _SIM.print(text);
-  _SIM.print("\r\n");
-  delay(3000);
-  // Add lipo charge information
-  _buffer = _readSerialString();
-  if(_charge == -1)
+  bool isOk = true;
+  sendStringToSIM("AT+CMGF=1\r\n");
+  isOk &= m_messageWellReceived();
+  delay(1000);
+  sendStringToSIM("AT+CPMS=\"SM\"\r\n");
+  isOk &= m_messageWellReceived();
+  delay(1000);
+  sendStringToSIM("AT+CSDH=1\r\n");
+  isOk &= m_messageWellReceived();
+
+  return isOk;
+}
+
+bool Sim800l::parseSmsData()
+{
+  // Send message to retrieve the SMS data
+  sendStringToSIM(F("AT+CMGL=\"ALL\"\n\r"));
+  m_waitForResponse(2000);
+
+  if(m_lastReceivedMsg.length() == 0)
   {
-    _SIM.print("!! No accu connected !!");
-  }
-  else
-  {
-    _SIM.print("Accu level : " + String(_charge) + "%");
-  }
-  delay(3000);
-  _buffer = _readSerialString();
-  _SIM.print((char)26);
-  delay(6000);
-  _buffer = _readSerialString();
-  //expect CMGS:xxx   , where xxx is a number,for the sending sms.
-  if (((_buffer.indexOf("CMGS")) != -1))
-  {
-    _buffer = "";
-    return true;
-  }
-  else
-  {
-    DEBUG_PRINTLN("not ok");
-    _buffer = "";
     return false;
   }
-}
-
-void Sim800l::setTimeInterval(uint16_t timeInMinutes)
-{
-  _timeInterval = (uint32_t)timeInMinutes * 60 * 1000;
-}
-
-bool Sim800l::sendWarning()
-{
-  bool msgSent  = false;
-  static uint32_t timer = millis();
-
-  if(firstCall || (_timeInterval != 0 && millis() - timer > _timeInterval))
+  else
   {
-    DEBUG_PRINTLN("Sending Warning");
-    msgSent = _sendSms("Watch out " + String(userName) + ", your power dropped out !");
-    if(msgSent)
+    m_removeCharUntil(","); // remove message type
+    m_removeCharUntil(",", 1); // remove "REC UNREAD"
+    
+    // extract sender's number
+    int index = m_lastReceivedMsg.indexOf("\"");
+    m_userNumber = m_lastReceivedMsg.substring(0, index);
+
+    if(m_userNumber.length() < 10)
     {
-      DEBUG_PRINTLN("Warning Sent");
-      timer = millis();
-      firstCall = false;
+      DEBUG_PRINTLN(F("Err: Msg nbr"));
+      m_userNumber = "";
+      m_clearLastMessage();
+      return false;
     }
+
+    m_removeCharUntil("\"", 1); // remove number
+    m_removeCharUntil(",\""); // remove name of sender
+    m_removeCharUntil(",\""); // remove date and other data
+    m_removeCharUntil(","); // remove extra number
+    m_removeCharUntil(","); // remove max data size
+
+    // extract msg length
+    index = m_lastReceivedMsg.indexOf("/");
+    int msgSize = m_lastReceivedMsg.substring(0, index).toInt();
+
+    if(msgSize == 0 || msgSize > 50)
+    {
+      DEBUG_PRINTLN(F("Err: Msg Size"));
+      m_clearLastMessage();
+      return false;
+    }
+
+    m_removeCharUntil("/"); // remove max data size
+    // extract msg
+    m_lastReceivedMsg.remove(msgSize, m_lastReceivedMsg.length());
+
+    return true;
   }
-
-  return msgSent;
-}
-
-bool Sim800l::sendPowerBack()
-{
-    DEBUG_PRINTLN("Sending Power Back");
-    _sendSms("Hi " + String(userName) + ", your power is back on!");
-}
-
-bool Sim800l::newUserConf()
-{
-  bool tmp = _newUser;
-  _newUser = false;
-  return tmp;
 }
 
 bool Sim800l::delAllSms()
 {
   DEBUG_PRINTLN("Deleting SMS");
-  _SIM.print(F("AT+CMGD=1,4\n\r"));
-  return _msgRecieved();
+  m_userNumber = "";
+  m_userName = "";
+  sendStringToSIM(F("AT+CMGD=1,4\n\r"));
+  return m_messageWellReceived();
 }
 
-void Sim800l::updateSerial()
+msgType Sim800l::extractTypeFromSms()
 {
-  delay(50);
-  while (Serial.available())
+  if(m_lastReceivedMsg == "")
   {
-    _SIM.write(Serial.read()); //Forward what Serial received to Software Serial Port
-  }
-}
-
-bool Sim800l::parseSmsData()
-{
-  const char initMsg[13] = {'A', 'T', '+', 'C', 'M', 'G', 'L', '=', '"', 'A', 'L', 'L', '"'};
-  int i = 0;
-  uint8_t commaCounter = 0;
-  String number = "";
-  uint8_t msgLength = 0;
-  
-  bool done = false;
-  bool error = false;
-
-  _recNumber = "";
-  _buffer = "";
-  _SIM.print("AT+CMGL=\"ALL\"\n\r");
-  
-  uint32_t lastNewData = millis(); 
-  while (!done && !error)
-  {
-    if (_SIM.available())
-    {
-      lastNewData = millis();
-      char value = _SIM.read();
-
-      if (i < 13 && value != initMsg[i]) // Check if correct AT+CMGL="ALL" message
-      {
-        DEBUG_PRINTLN("Wrong init msg");
-        error = true;
-        break;
-      }
-      else if (value == ',')
-      {
-        commaCounter++;
-        i = max(commaCounter * 10, 15); // avoid going back to lower than 13
-      }
-
-      if (commaCounter == 2) // Extract number
-      {
-        if (i > 21)
-        {
-          if (value == '"')
-          {
-            number = _buffer;
-            _buffer = "";
-          }
-          else
-          {
-            _buffer += value;
-          }
-        }
-      }
-      else if (commaCounter == 12 && i > 120) // extract message length
-      {
-        _buffer += value;
-        if (i == 122)
-        {
-          msgLength = _buffer.toInt();
-          _buffer = "";
-          commaCounter++;
-          i = 130;
-        }
-      }
-
-      if (msgLength != 0)
-      {
-        if(msgLength < 50)
-        {
-          if (i > 130 && i < 133 + msgLength)
-          {
-            if((byte)value != 0B00001101 && (byte)value != 0B00001010)
-            {
-              _buffer += value;
-            }
-          }
-          else if(i > 133 + msgLength)
-          {
-            done = true;
-          }
-        }
-        else
-        {
-          error = true;
-          DEBUG_PRINTLN("To long message");
-        }  
-      }
-
-      i++;
-      if (i > 300)
-        error = true;
-    }
-
-    if(millis() - lastNewData > 500)
-    {
-      done = true;
-    }
-  }
-
-  if (number != "")
-  {
-    DEBUG_PRINTLN("Number: " + number);
-    _recNumber = number;
-    number = "";
-  }
-
-  if (msgLength != 0)
-  {
-    DEBUG_PRINTLN("Length: " + String(msgLength));
-    msgLength = 0;
-  }
-
-  if (_buffer != "")
-  {
-    DEBUG_PRINTLN("Buff: " + _buffer);
-  }
-
-  _flush();
-  i = 0;
-  commaCounter = 0;
-  number = "";
-  msgLength = 0;
-
-  return !error;
-}
-
-bool Sim800l::extractSettings()
-{
-  DEBUG_PRINTLN(_buffer);
-  DEBUG_PRINTLN(_buffer.indexOf("#Set"));
-  DEBUG_PRINTLN(_buffer.indexOf("#Status"));
-  if(_buffer == "")
-  {
-    DEBUG_PRINTLN("Empty buffer, data lost");
-    return false;
+    DEBUG_PRINTLN(F("Err: sms data lost"));
+    return ERROR;
   }
   else
   {
-    if(_buffer.indexOf("#Set") != -1)
+    if(m_lastReceivedMsg.indexOf("#Set") != -1)
     {
       DEBUG_PRINTLN("Setting Message");
-      return _parseSettings();
-    }
-    else if(_buffer.indexOf("#Reset") != -1)
-    {
-      DEBUG_PRINTLN("Reset Message");
-      userName = "Default";
-      userNumber = "+33000000000";
-      _newUser = true;
-      return true;
-    }
-    else if(_buffer.indexOf("#Status") != -1)
-    {
-      DEBUG_PRINTLN("Status Message");
-      String message = "Hi " + userName + ".\r\n";
-      if(_isPowerPlugged)
+      if(m_parseSettingsMsg())
       {
-        message += "The power is normal.";
+        return SETTINGS;
       }
       else
-      {
-        message += "The power is down !";
-      }
-      _sendSms(message);
-      return true;
+        return ERROR;
+    }
+    else if(m_lastReceivedMsg.indexOf("#Reset") != -1)
+    {
+      DEBUG_PRINTLN("Reset Message");
+      return RESET;
+    }
+    else if(m_lastReceivedMsg.indexOf("#Status") != -1)
+    {
+      DEBUG_PRINTLN("Status Message");
+      return STATUS;
+    }
+    else if(m_lastReceivedMsg.indexOf("#Stop") != -1)
+    {
+      DEBUG_PRINTLN("Stop Message");
+      return STOP;
     }
     else
     {
-      return false;
+      return ERROR;
     }
   }
-  
 }
 
-void Sim800l::setPowerSource(bool isPlugged)
+bool Sim800l::sendSms(String smsText, String number, String name)
 {
-  _isPowerPlugged = isPlugged;
-}
-
-void Sim800l::_flush()
-{
-  while (_SIM.available())
+  sendStringToSIM("AT+CMGS=\"" + number + "\"\r"); // command to send sms
+  m_waitForResponse(2000, false);
+  // Send text
+  sendStringToSIM("Hi " + name + "\n" + smsText);
+  m_SIM.print((char)26);
+  m_waitForResponse(2000);
+  //expect CMGS:xxx   , where xxx is a number,for the sending sms.
+  if (((m_lastReceivedMsg.indexOf("CMGS")) != -1))
   {
-    byte junk = _SIM.read();
-  }
-}
-
-String Sim800l::_readSerialString()
-{
-  String output = "";
-
-  int c;
-  uint32_t startMillis = millis();
-  do {
-    c = _SIM.read();
-    if (c >= 0)
-    {
-      output += (char)c;
-    }
-    else
-    {
-      return output;
-    }
-  } while(millis() - startMillis < 4000);
-  
-  DEBUG_PRINTLN("Time Out");
-  return "";     // -1 indicates timeout
-}
-
-bool Sim800l::_msgRecieved()
-{
-  delay(3000);
-  _buffer = _readSerialString();
-
-  DEBUG_PRINTLN(_buffer);
-  if (_buffer.indexOf("OK") != -1)
-  {
-    _buffer = "";
+    m_clearLastMessage();
     return true;
   }
   else
   {
-    _buffer = "";
+    m_clearLastMessage();
+    m_waitForResponse(6000);
+    if (((m_lastReceivedMsg.indexOf("CMGS")) != -1))
+    {
+      m_clearLastMessage();
+      return true;
+    }
+    else
+    {
+      DEBUG_PRINTLN(m_lastReceivedMsg);
+      DEBUG_PRINTLN(F("Err: SMS send errror"));
+      m_clearLastMessage();
+      return false;
+    }
+  }
+}
+
+String Sim800l::getUserName()
+{
+  return m_userName;
+}
+
+String Sim800l::getUserNumber()
+{
+  return m_userNumber;
+}
+//
+//PRIVATE METHODS
+//
+
+void Sim800l::m_flush()
+{
+  while (m_SIM.available())
+  {
+    byte junk = m_SIM.read();
+  }
+  m_inputBuffer = "";
+}
+
+bool 	Sim800l::m_messageWellReceived()
+{
+  m_waitForResponse(2000);
+
+  if (m_lastReceivedMsg.indexOf("OK") != -1)
+  {
+    m_clearLastMessage();
+    return true;
+  }
+  else
+  {
+    m_clearLastMessage();
     return false;
   }
 }
 
-bool Sim800l::_parseSettings()
+void Sim800l::m_waitForResponse(int timeOut, bool keepMessage)
 {
-  bool fullSettings = true;
-  int idx = _buffer.indexOf("#Name:");
-  if(idx != -1)
+  uint32_t timer = millis();
+  while(m_lastReceivedMsg.length() == 0 && millis() - timer < timeOut)
   {
-    int i = 0;
-    userName = "";
-    while(_buffer[idx + 6 + i] != '#' && i < _buffer.length())
-    {
-      userName+=_buffer[idx + 6 + i];
-      i++;
-    }
-    DEBUG_PRINTLN("Name: " + userName);
+    checkForIncommingData();
   }
-  else
-  {
-    fullSettings = false;
-  }
-  
 
-  idx = _buffer.indexOf("#Nbr:");
-  if(idx != -1)
+  if(!keepMessage)
   {
-    int i = 0;
-    userNumber = "";
-    if(_buffer.indexOf("this", idx + 5) != -1)
+    m_clearLastMessage();
+  }
+}
+
+void 	Sim800l::m_removeCharUntil(String character, int extraChar)
+{
+  int index = m_lastReceivedMsg.indexOf(character);
+  m_lastReceivedMsg.remove(0, index + 1 + extraChar);
+}
+
+bool Sim800l::m_parseSettingsMsg()
+{
+  int nameIdx = m_lastReceivedMsg.indexOf("#Name:");
+  int nbrIdx = m_lastReceivedMsg.indexOf("#Nbr:");
+  
+  if(nameIdx != -1 && nbrIdx != -1)
+  {
+    int nameEndIndex = m_lastReceivedMsg.indexOf("#", nameIdx + 1);
+    int nbrEndIndex = m_lastReceivedMsg.indexOf("#", nbrIdx + 1);
+
+    if(nameEndIndex == -1 || nbrEndIndex == -1 || nbrEndIndex == nameIdx || nameEndIndex == nbrIdx)
     {
-      userNumber = _recNumber;
+      m_userNumber = "";
+      m_userName = "";
+      m_clearLastMessage();
+      DEBUG_PRINTLN(F("Err: incorrect settings"));
+      return false;
     }
     else
     {
-      i = 0;
-      while(_buffer[idx + 5 + i] != '#' && i < _buffer.length())
+      m_userName = m_lastReceivedMsg.substring(nameIdx + 6, nameEndIndex);
+
+      if(m_lastReceivedMsg.indexOf("this", nbrIdx) == -1)
       {
-        userNumber+=_buffer[idx + 5 + i];
-        i++;
+        m_userNumber = m_lastReceivedMsg.substring(nbrIdx + 5, nbrEndIndex);
+
+        if(m_userNumber.length() < 10)
+        {
+          m_userNumber = "";
+          m_userName = "";
+          m_clearLastMessage();
+          DEBUG_PRINTLN(F("Err: incorrect number"));
+          return false;
+        }
       }
+
+      m_clearLastMessage();
+      DEBUG_PRINTLN(String(m_userName) + "\t" + String(m_userNumber));
+      return true;
     }
-    DEBUG_PRINTLN("Number: " + userNumber);
   }
   else
   {
-    fullSettings = false;
+    m_userNumber = "";
+    m_userName = "";
+    m_clearLastMessage();
+    DEBUG_PRINTLN(F("Err: incorrect settings"));
+    return false;
   }
-
-  idx = _buffer.indexOf("#Interval:");
-  if(idx != -1)
-  {
-    int i = 0;
-    String interval = "";
-    while(_buffer[idx + 10 + i] != '#' && i < _buffer.length())
-    {
-      interval+=_buffer[idx + 10 + i];
-      i++;
-    }
-
-    uint16_t timeInterval = interval.toInt();
-    setTimeInterval(timeInterval);
-    DEBUG_PRINTLN("Interval: " + interval + " " + String(_timeInterval));
-  }
-
-  _newUser = fullSettings;
-
-  if(_newUser)
-  {
-    _flush();
-    _sendSms("Welcome " + String(userName) + " !");
-  }
-
-  _buffer="";
-
-  //TO DO : return true if settings set in separate texts
-  return fullSettings;
 }
+
+void Sim800l::m_clearLastMessage()
+{
+  m_lastReceivedMsg = "";
+}
+
+} //namespace Sim800
