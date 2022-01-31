@@ -12,6 +12,8 @@ bool powerBackMessageSent = true;
 String userName = "";
 String userNumber = "";
 
+byte pwrControlByte = 0;
+
 void setup()
 {
   pinMode(LED_R, OUTPUT);
@@ -33,6 +35,7 @@ void setup()
   digitalWrite(LED_G, LOW);
 
   Serial.begin(115200);
+  bitSet(pwrControlByte, PWR_SELECT);
 
   sim800l.begin(); // initializate the library.
 
@@ -87,10 +90,12 @@ void loop(){
           storePowerBackSent(false);
         }
 
-        if(!warningMessageSent && (lastMessageSent == 0 || millis() - lastMessageSent > 120000))
+        if(!warningMessageSent && (lastMessageSent == 0 || millis() - lastMessageSent > 30000))
         {
+          delay(1000);
+          sim800l.setToReceptionMode();
           storeWarningSent(true);
-          if(sim800l.sendSms(F("Watch out ! It looks like your power went down."), userNumber, userName))
+          if(sim800l.sendSms(F("Watch out ! Your power went down."), userNumber, userName))
           {
             lastMessageSent = 0;
             warningMessageSent = true;
@@ -115,6 +120,8 @@ void loop(){
 
         if(!powerBackMessageSent && (lastMessageSent == 0 || millis() - lastMessageSent > 120000))
         {
+          delay(1000);
+          sim800l.setToReceptionMode();
           storePowerBackSent(true);
           if(sim800l.sendSms(F("Good news ! It looks like your power is back on."), userNumber, userName))
           {
@@ -136,6 +143,12 @@ void loop(){
 
     if(sim800l.newSmsAvailable())
     {
+      for(int i=0; i < 5; i++)
+      {
+        digitalWrite(LED_G, (i+1)%2);
+        delay(50);
+      }
+
       if(sim800l.parseSmsData())
       {
         Sim800::msgType receivedMsgType = sim800l.extractTypeFromSms();
@@ -215,21 +228,29 @@ bool selectPowerInput(int& initVoltage)
     initVoltage = supplyVoltage;
   }
 
-  if(!switched && supplyVoltage < (long)initVoltage * 90 / 100)
+  if(!switched && supplyVoltage < (long)initVoltage * 92 / 100)
   {
     // switch to battery input
-    digitalWrite(PWR_SELECT, LOW);
+    PORTD &= !pwrControlByte;  // set pin to low
     switched = true;
     DEBUG_PRINTLN("BAT IN");
     DEBUG_PRINTLN(String(supplyVoltage) + "\t" + String(initVoltage));
   }
   else if(switched && isPowerConnected())
   {
-    digitalWrite(PWR_SELECT, HIGH);
+    PORTD |= pwrControlByte; // set pin to high
     switched = false;
     DEBUG_PRINTLN("USB IN");
     DEBUG_PRINTLN(String(supplyVoltage) + "\t" + String(initVoltage));
   }
+
+  /*
+  static uint32_t timer = millis();
+  if(millis() -  timer > 300)
+  {
+    DEBUG_PRINTLN(String(supplyVoltage) + "\t" + String(initVoltage));
+  }
+  */
 
   return switched;
 }
@@ -263,6 +284,7 @@ void initConnection()
   bool isConnected = false;
 
   uint32_t initTimer = 0;
+  uint32_t globalTimer = millis();
   bool ledON = true;
 
   while(!isConnected)
@@ -273,7 +295,7 @@ void initConnection()
       {
         initTimer = millis();
       }
-      else if(millis() - initTimer > 3000)
+      else if(millis() - initTimer > 60000L)
       {
         isConnected = true;
       }
@@ -281,6 +303,12 @@ void initConnection()
     else if(sim800l.hasCorrectSignal(2) == -1)
     {
       initTimer = 0;
+    }
+
+    if(initTimer == 0 && millis() - globalTimer > 30000)
+    {
+      //sim800l.reset();
+      globalTimer = millis();
     }
 
     blinkLed(LED_R, 500, 0);
@@ -291,15 +319,18 @@ void initConnection()
 bool gsmSignalOK()
 {
   static bool gmsSignal = true;
+  static int interval = 20;
   
-  int signalStatus = sim800l.hasCorrectSignal(60);
+  int signalStatus = sim800l.hasCorrectSignal(interval);
 
   if(signalStatus == 1)
   {
+    interval = 20;
     gmsSignal = true;
   }
   else if(signalStatus == -1)
   {
+    interval = 5;
     gmsSignal = false;
   }
 

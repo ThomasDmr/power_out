@@ -1,12 +1,14 @@
 #pragma once
 
-#define DEBUG
+//#define DEBUG
 
 #ifdef DEBUG
 #define DEBUG_PRINTLN(x) Serial.println(x)
 #else
 #define DEBUG_PRINTLN(x)
 #endif
+
+#define bitSet(x, n)        ((x) |= bit(n))
 
 const int LED_R         = 11;
 const int LED_G         = 10;

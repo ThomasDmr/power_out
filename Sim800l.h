@@ -9,7 +9,7 @@
 #include <SoftwareSerial.h>
 #include "Arduino.h"
 
-#define DEBUG
+//#define DEBUG
 
 #ifdef DEBUG
 #define DEBUG_PRINTLN(x) Serial.println(x)
@@ -31,6 +31,7 @@ class Sim800l
 	void 	checkForIncommingData();
 	int	 	hasCorrectSignal(int callInterval_second);
 	bool 	setToReceptionMode();
+	void 	reset();
 
 
 	bool 	newSmsAvailable();

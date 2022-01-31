@@ -18,6 +18,8 @@ Sim800l::Sim800l(uint8_t pinRX, uint8_t pinTX, uint8_t pinRST, int baudRate = 48
 
 void Sim800l::begin()
 {
+  // pinMode(m_pinRST, OUTPUT);
+  // digitalWrite(m_pinRST, HIGH);
   m_inputBuffer.reserve(50);
   m_SIM.begin(m_baudRate);
   delay(500);
@@ -25,6 +27,15 @@ void Sim800l::begin()
 
   delay(1000);
   m_flush();
+}
+
+void Sim800l::reset()
+{
+  DEBUG_PRINTLN("Reset");
+  // digitalWrite(m_pinRST, LOW);
+  // delay(1000);
+  // digitalWrite(m_pinRST, HIGH);
+  // delay(1000);
 }
 
 void Sim800l::checkForIncommingData()
@@ -76,7 +87,7 @@ int Sim800l::hasCorrectSignal(int callInterval_second)
 {
   static uint32_t lastCall = 0;
 
-  if (millis() - lastCall > callInterval_second * 1000)
+  if (millis() - lastCall > (uint32_t)callInterval_second * 1000)
   {
     DEBUG_PRINTLN("Connection Check");
     lastCall = millis();
